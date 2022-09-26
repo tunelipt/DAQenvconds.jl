@@ -1,7 +1,7 @@
 module DAQenvconds
 
 using PyCall
-using AbstractDAQs
+using DAQCore
 import Dates: DateTime, now
 import DataStructures: OrderedDict
 export EnvConds, daqconfigdev, daqconfig, daqstop, daqacquire
@@ -10,37 +10,33 @@ export daqchannels, numchannels, devname, devtype
 export readpressure, readpresstemp, readhumidity, readhumtemp, readtemp
 export daqclear, daqstatus
 
-mutable struct EnvConds <: AbstractDAQ
+mutable struct EnvConds <: AbstractInputDev
     devname::String
     ip::String
     port::Int32
     server::PyObject
-    conf::DAQConfig
-    channames::Vector{String}
-    chanidx::OrderedDict{String,Int}
+    config::DaqConfig
+    chans::DaqChannels
     time::DateTime
 end
 
-AbstractDAQs.devtype(dev::EnvConds) = "EnvConds"
+DAQCore.devtype(dev::EnvConds) = "EnvConds"
 
 function EnvConds(devname, ip, port=9539)
     xmlrpc = pyimport("xmlrpc.client")
     server = xmlrpc.ServerProxy("http://$ip:$port")
-    conf = DAQConfig(devname=devname, ip=ip, model="EnvConds")
-
-    channames = server["channels"]()
-    chanidx = OrderedDict{String,Int}()
-    for (i,ch) in enumerate(channames)
-        chanidx[ch] = i
-    end
-    conf.fpars["time"] = server["daqtime"]()
+    config = DaqConfig(ip=ip, port=port, model="EnvConds")
     
-    EnvConds(devname, ip, port, server, conf,
-             channames, chanidx,  now())
+    channames = server["channels"]()
+    chans = DaqChannels(devname, "EnvConds", channames)
+    fparam!(config, "time", server["daqtime"]())
+    
+    EnvConds(devname, ip, port, server, config,
+             chans,  now())
 end
 
 
-function AbstractDAQs.daqaddinput(dev::EnvConds, chans::AbstractVector{<:String})
+function DAQCore.daqaddinput(dev::EnvConds, chans::AbstractVector{<:String})
     achans = dev.server["availablechannels"]()
 
     for ch in chans
@@ -50,12 +46,14 @@ function AbstractDAQs.daqaddinput(dev::EnvConds, chans::AbstractVector{<:String}
     end
 
     dev.server["addinput"](chans)
-
+    channames = server["channels"]()
+    chans = DaqChannels(devname, "EnvConds", channames)
+    
     return
     
 end
 
-function AbstractDAQs.daqaddinput(dev::EnvConds, chans::AbstractVector{<:Integer})
+function DAQCore.daqaddinput(dev::EnvConds, chans::AbstractVector{<:Integer})
     achans = dev.server["availablechannels"]()
     cmin, cmax = extrema(chans)
     
@@ -66,38 +64,25 @@ function AbstractDAQs.daqaddinput(dev::EnvConds, chans::AbstractVector{<:Integer
     schans = achans[chans]
     
     dev.server["addinput"](schans)
+    chans = DaqChannels(devname, "EnvConds", schans)
     
-    dev.channames = schans
-    chanidx = OrderedDict{String,Int}()
-    for (i,ch) in enumerate(dev.channames)
-        chanidx[ch] = i
-    end
-    dev.chanidx = chanidx
     return
     
 end
 
-AbstractDAQs.daqconfigdev(dev::EnvConds; time=1) = dev.server["daqtime"](time)
+DAQCore.daqconfigdev(dev::EnvConds; time=1) = dev.server["daqtime"](time)
 
-AbstractDAQs.daqconfig(dev::EnvConds; time=1) = dev.server["daqtime"](time)
+DAQCore.daqconfig(dev::EnvConds; time=1) = dev.server["daqtime"](time)
 
 
-function AbstractDAQs.daqstart(dev::EnvConds)
+function DAQCore.daqstart(dev::EnvConds)
     dev.time = now()
     dev.server["start"]()
 end
 
-function AbstractDAQs.daqchannels(dev::EnvConds)
-    dev.channames = dev.server["channels"]()
-    chanidx = OrderedDict{String,Int}()
-    for (i,ch) in enumerate(dev.channames)
-        chanidx[ch] = i
-    end
-    dev.chanidx = chanidx
-    return dev.channames
-end
+DAQCore.daqchannels(dev::EnvConds) = daqchannels(dev.chans)
 
-AbstractDAQs.numchannels(dev::EnvConds) = length(dev.channames)
+DAQCore.numchannels(dev::EnvConds) = numchannels(dev.chans)
 
 
 function parse_response(E)
@@ -126,26 +111,25 @@ function parse_response(E)
                      
 end
 
-function AbstractDAQs.daqread(dev::EnvConds)
+function DAQCore.daqread(dev::EnvConds)
     E,rate = dev.server["read"]()
     X = parse_response(E)
-    
-    return MeasData{Matrix{Float64}}(devname(dev), devtype(dev),
-                                     dev.time, rate, X, dev.chanidx)
+    sampling = DaqSamplingRate(rate, size(X,2), dev.time)
+    return MeasData(devname(dev), devtype(dev), sampling, X, dev.chans)
 end
 
-function AbstractDAQs.daqacquire(dev::EnvConds)
+function DAQCore.daqacquire(dev::EnvConds)
     dev.time = now()
     E,rate = dev.server["acquire"]()
     X = parse_response(E)
-    return MeasData{Matrix{Float64}}(devname(dev), devtype(dev),
-                                     dev.time, rate, X, dev.chanidx)
+    sampling = DaqSamplingRate(rate, size(X,2), dev.time)
+    return MeasData(devname(dev), devtype(dev), sampling, X, dev.chans)
 end
 
 
-AbstractDAQs.isreading(dev::EnvConds) = dev.server["isacquiring"]()
-AbstractDAQs.samplesread(dev::EnvConds) = dev.server["samplesread"]()
-AbstractDAQs.daqstop(dev::EnvConds) = dev.server["stop"]()
+DAQCore.isreading(dev::EnvConds) = dev.server["isacquiring"]()
+DAQCore.samplesread(dev::EnvConds) = dev.server["samplesread"]()
+DAQCore.daqstop(dev::EnvConds) = dev.server["stop"]()
 
 readpressure(dev::EnvConds) = dev.server["press"]()
 readpresstemp(dev::EnvConds) = dev.server["presstemp"]()
